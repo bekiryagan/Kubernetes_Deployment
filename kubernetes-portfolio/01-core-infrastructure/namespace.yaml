@@ -1,0 +1,86 @@
+# =============================================================================
+# Core Infrastructure - Namespace Configuration
+# Author: Bekir Yagan
+# =============================================================================
+# This file defines production namespaces with proper labeling for:
+# - Pod Security Standards enforcement
+# - Network policy isolation
+# - Resource quota management
+# =============================================================================
+
+---
+# Production namespace for main workloads
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    # Pod Security Standards - restrict mode for production
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    # Custom labels for organization
+    environment: production
+    team: platform
+    cost-center: engineering
+    managed-by: kubernetes
+---
+# Staging namespace for pre-production testing
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    environment: staging
+    team: platform
+    cost-center: engineering
+    managed-by: kubernetes
+---
+# Development namespace with relaxed policies
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: development
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    environment: development
+    team: platform
+    cost-center: engineering
+    managed-by: kubernetes
+---
+# Monitoring namespace for observability stack
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    environment: production
+    team: sre
+    cost-center: infrastructure
+    managed-by: kubernetes
+---
+# Database namespace for stateful workloads
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: database
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    environment: production
+    team: dba
+    cost-center: infrastructure
+    data-classification: sensitive
+    managed-by: kubernetes

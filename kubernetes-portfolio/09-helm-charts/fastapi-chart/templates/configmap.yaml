@@ -1,0 +1,16 @@
+{{/*
+=============================================================================
+FastAPI ConfigMap Template
+Author: bekiryagan
+=============================================================================
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fastapi.fullname" . }}-config
+  labels:
+    {{- include "fastapi.labels" . | nindent 4 }}
+data:
+{{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}

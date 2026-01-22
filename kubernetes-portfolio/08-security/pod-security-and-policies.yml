@@ -1,0 +1,466 @@
+# =============================================================================
+# Security Configuration - Pod Security, OPA, and Network Policies
+# Author: bekiryagan
+# Description: Comprehensive security hardening for Kubernetes
+# =============================================================================
+
+---
+# =============================================================================
+# Pod Security Standards (PSS)
+# =============================================================================
+
+# Restricted namespace (highest security)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-apps
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    app.kubernetes.io/managed-by: bekiryagan
+
+---
+# =============================================================================
+# OPA Gatekeeper Constraints
+# =============================================================================
+
+# Constraint Template: Require Resource Limits
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredresources
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredResources
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            limits:
+              type: array
+              items:
+                type: string
+            requests:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredresources
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          provided := {resource_type | container.resources.limits[resource_type]}
+          required := {resource_type | resource_type := input.parameters.limits[_]}
+          missing := required - provided
+          count(missing) > 0
+          msg := sprintf("Container %v is missing required resource limits: %v", [container.name, missing])
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          provided := {resource_type | container.resources.requests[resource_type]}
+          required := {resource_type | resource_type := input.parameters.requests[_]}
+          missing := required - provided
+          count(missing) > 0
+          msg := sprintf("Container %v is missing required resource requests: %v", [container.name, missing])
+        }
+
+---
+# Constraint: Enforce Resource Limits
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredResources
+metadata:
+  name: require-resource-limits
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - production
+      - staging
+  parameters:
+    limits:
+      - cpu
+      - memory
+    requests:
+      - cpu
+      - memory
+
+---
+# Constraint Template: Require Labels
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredlabels
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredLabels
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            labels:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredlabels
+        
+        violation[{"msg": msg}] {
+          provided := {label | input.review.object.metadata.labels[label]}
+          required := {label | label := input.parameters.labels[_]}
+          missing := required - provided
+          count(missing) > 0
+          msg := sprintf("Resource %v is missing required labels: %v", [input.review.object.metadata.name, missing])
+        }
+
+---
+# Constraint: Require Standard Labels
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: require-standard-labels
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    namespaces:
+      - production
+  parameters:
+    labels:
+      - app.kubernetes.io/name
+      - app.kubernetes.io/version
+
+---
+# Constraint Template: Block Privileged Containers
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblockprivileged
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sBlockPrivileged
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sblockprivileged
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("Privileged container is not allowed: %v", [container.name])
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("Privileged init container is not allowed: %v", [container.name])
+        }
+
+---
+# Constraint: Block Privileged
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sBlockPrivileged
+metadata:
+  name: block-privileged-containers
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    excludedNamespaces:
+      - kube-system
+
+---
+# Constraint Template: Require Non-Root
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequirenonroot
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireNonRoot
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequirenonroot
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          not input.review.object.spec.securityContext.runAsNonRoot
+          msg := sprintf("Container %v must set securityContext.runAsNonRoot to true", [container.name])
+        }
+
+---
+# Constraint: Require Non-Root
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireNonRoot
+metadata:
+  name: require-non-root-containers
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - production
+      - staging
+
+---
+# =============================================================================
+# Network Policies - Zero Trust Architecture
+# =============================================================================
+
+# Default deny all
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Allow DNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Allow FastAPI to MySQL
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fastapi-to-mysql
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: fastapi
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mysql
+      ports:
+        - protocol: TCP
+          port: 3306
+
+---
+# Allow FastAPI to Redis
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fastapi-to-redis
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: fastapi
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# Allow ingress to FastAPI
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-fastapi
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: fastapi
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+
+---
+# Allow Prometheus to scrape metrics
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scraping
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  podSelector:
+    matchLabels:
+      prometheus.io/scrape: "true"
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 8000
+        - protocol: TCP
+          port: 9104
+        - protocol: TCP
+          port: 9121
+
+---
+# =============================================================================
+# Secrets Encryption Configuration
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: encryption-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+data:
+  encryption-config.yaml: |
+    apiVersion: apiserver.config.k8s.io/v1
+    kind: EncryptionConfiguration
+    resources:
+      - resources:
+          - secrets
+        providers:
+          - aescbc:
+              keys:
+                - name: key1
+                  secret: <base64-encoded-32-byte-key>
+          - identity: {}
+
+---
+# =============================================================================
+# Audit Policy
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-policy
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+data:
+  audit-policy.yaml: |
+    apiVersion: audit.k8s.io/v1
+    kind: Policy
+    rules:
+      # Log all requests at the Metadata level
+      - level: Metadata
+        resources:
+          - group: ""
+            resources: ["secrets", "configmaps"]
+      
+      # Log pod exec/attach at RequestResponse level
+      - level: RequestResponse
+        resources:
+          - group: ""
+            resources: ["pods/exec", "pods/attach", "pods/portforward"]
+      
+      # Log all changes to deployments
+      - level: RequestResponse
+        verbs: ["create", "update", "patch", "delete"]
+        resources:
+          - group: "apps"
+            resources: ["deployments", "statefulsets", "daemonsets"]
+      
+      # Log authentication failures
+      - level: Metadata
+        omitStages:
+          - "RequestReceived"
+        resources:
+          - group: "authentication.k8s.io"
+            resources: ["tokenreviews"]
+      
+      # Default: log all at Metadata level
+      - level: Metadata
+        omitStages:
+          - "RequestReceived"

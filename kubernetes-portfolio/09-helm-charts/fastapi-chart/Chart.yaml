@@ -1,0 +1,46 @@
+# =============================================================================
+# FastAPI Helm Chart
+# Author: bekiryagan
+# Description: Production-ready Helm chart for FastAPI applications
+# =============================================================================
+
+apiVersion: v2
+name: fastapi
+description: A Helm chart for deploying FastAPI applications on Kubernetes
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+keywords:
+  - fastapi
+  - python
+  - api
+  - microservice
+  - rest
+
+home: https://github.com/bekiryagan/kubernetes-portfolio
+sources:
+  - https://github.com/bekiryagan/kubernetes-portfolio
+
+maintainers:
+  - name: bekiryagan
+    email: bekir@example.com
+    url: https://github.com/bekiryagan
+
+dependencies:
+  - name: mysql
+    version: "9.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: mysql.enabled
+  - name: redis
+    version: "18.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+
+annotations:
+  artifacthub.io/license: MIT
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://github.com/bekiryagan/kubernetes-portfolio/blob/main/README.md
+    - name: Source
+      url: https://github.com/bekiryagan/kubernetes-portfolio

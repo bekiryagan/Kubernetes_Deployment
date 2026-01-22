@@ -1,0 +1,404 @@
+# =============================================================================
+# MySQL Cluster - Production StatefulSet with Replication
+# Author: bekiryagan
+# Description: High-availability MySQL cluster with primary-replica setup
+# =============================================================================
+
+---
+# Headless Service for StatefulSet DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+  selector:
+    app.kubernetes.io/name: mysql
+
+---
+# Primary Service (read-write)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-primary
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  type: ClusterIP
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+  selector:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/role: primary
+
+---
+# Read-only Service (replicas)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-read
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  type: ClusterIP
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+  selector:
+    app.kubernetes.io/name: mysql
+
+---
+# MySQL Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/managed-by: bekiryagan
+data:
+  primary.cnf: |
+    [mysqld]
+    # Server ID for replication (primary)
+    server-id=1
+    
+    # Binary logging for replication
+    log-bin=mysql-bin
+    binlog_format=ROW
+    binlog_row_image=FULL
+    expire_logs_days=7
+    
+    # InnoDB settings
+    innodb_buffer_pool_size=1G
+    innodb_log_file_size=256M
+    innodb_flush_log_at_trx_commit=1
+    innodb_flush_method=O_DIRECT
+    
+    # Connection settings
+    max_connections=500
+    max_allowed_packet=64M
+    
+    # Performance settings
+    tmp_table_size=64M
+    max_heap_table_size=64M
+    query_cache_type=0
+    
+    # Character set
+    character-set-server=utf8mb4
+    collation-server=utf8mb4_unicode_ci
+    
+    # Slow query log
+    slow_query_log=1
+    slow_query_log_file=/var/log/mysql/slow-query.log
+    long_query_time=2
+    
+  replica.cnf: |
+    [mysqld]
+    # Server ID for replication (will be overridden)
+    server-id=2
+    
+    # Read-only replica
+    read_only=1
+    super_read_only=1
+    
+    # Relay log settings
+    relay-log=mysql-relay-bin
+    log_slave_updates=1
+    
+    # InnoDB settings
+    innodb_buffer_pool_size=1G
+    innodb_log_file_size=256M
+    innodb_flush_method=O_DIRECT
+    
+    # Connection settings
+    max_connections=500
+    max_allowed_packet=64M
+    
+    # Character set
+    character-set-server=utf8mb4
+    collation-server=utf8mb4_unicode_ci
+
+---
+# MySQL Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secrets
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/managed-by: bekiryagan
+type: Opaque
+stringData:
+  root-password: "datascientest1234"
+  replication-user: "replicator"
+  replication-password: "replication-secure-password"
+
+---
+# Init SQL ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-init-scripts
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/managed-by: bekiryagan
+data:
+  init.sql: |
+    -- Create application database
+    CREATE DATABASE IF NOT EXISTS Main CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    
+    -- Use the database
+    USE Main;
+    
+    -- Create Users table
+    CREATE TABLE IF NOT EXISTS Users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(255) NOT NULL UNIQUE,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_username (username),
+        INDEX idx_email (email)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    
+    -- Insert sample data
+    INSERT INTO Users (username, email) VALUES
+        ('daniel', 'daniel@datascientest.com'),
+        ('alice', 'alice@datascientest.com'),
+        ('bob', 'bob@datascientest.com')
+    ON DUPLICATE KEY UPDATE username=username;
+    
+    -- Create replication user
+    CREATE USER IF NOT EXISTS 'replicator'@'%' IDENTIFIED BY 'replication-secure-password';
+    GRANT REPLICATION SLAVE ON *.* TO 'replicator'@'%';
+    FLUSH PRIVILEGES;
+
+---
+# MySQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  serviceName: mysql-headless
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+        app.kubernetes.io/component: database
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9104"
+    spec:
+      serviceAccountName: app-service-account
+      
+      # Security context
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      
+      # Pod anti-affinity
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: mysql
+              topologyKey: kubernetes.io/hostname
+      
+      # Init containers
+      initContainers:
+        # Clone data from previous pod (for replicas)
+        - name: init-mysql
+          image: mysql:8.0
+          command:
+            - bash
+            - -c
+            - |
+              set -ex
+              # Generate server-id from pod ordinal
+              [[ $(hostname) =~ -([0-9]+)$ ]] || exit 1
+              ordinal=${BASH_REMATCH[1]}
+              
+              # Copy appropriate config file
+              if [[ $ordinal -eq 0 ]]; then
+                cp /mnt/config-map/primary.cnf /mnt/conf.d/server.cnf
+                echo "[mysqld]" >> /mnt/conf.d/server.cnf
+                echo "server-id=1" >> /mnt/conf.d/server.cnf
+              else
+                cp /mnt/config-map/replica.cnf /mnt/conf.d/server.cnf
+                echo "[mysqld]" >> /mnt/conf.d/server.cnf
+                echo "server-id=$((100 + ordinal))" >> /mnt/conf.d/server.cnf
+              fi
+          volumeMounts:
+            - name: conf
+              mountPath: /mnt/conf.d
+            - name: config-map
+              mountPath: /mnt/config-map
+      
+      containers:
+        # MySQL container
+        - name: mysql
+          image: mysql:8.0
+          ports:
+            - name: mysql
+              containerPort: 3306
+          
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+            - name: MYSQL_REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: replication-user
+            - name: MYSQL_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: replication-password
+          
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+          
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+                - -uroot
+                - -p${MYSQL_ROOT_PASSWORD}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          readinessProbe:
+            exec:
+              command:
+                - mysql
+                - -h
+                - localhost
+                - -uroot
+                - -p${MYSQL_ROOT_PASSWORD}
+                - -e
+                - "SELECT 1"
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+        
+        # MySQL Exporter sidecar for Prometheus
+        - name: mysql-exporter
+          image: prom/mysqld-exporter:v0.15.0
+          ports:
+            - name: metrics
+              containerPort: 9104
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+            - name: DATA_SOURCE_NAME
+              value: "root:$(MYSQL_ROOT_PASSWORD)@(localhost:3306)/"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      
+      volumes:
+        - name: conf
+          emptyDir: {}
+        - name: config-map
+          configMap:
+            name: mysql-config
+        - name: init-scripts
+          configMap:
+            name: mysql-init-scripts
+  
+  # Persistent Volume Claims
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: mysql
+          app.kubernetes.io/managed-by: bekiryagan
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 50Gi
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mysql-pdb
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql

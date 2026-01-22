@@ -1,0 +1,269 @@
+# =============================================================================
+# Disaster Recovery - Backup and Restore Strategies
+# Author: bekiryagan
+# Description: Velero-based backup solution with scheduled backups
+# =============================================================================
+
+---
+# Velero Schedule for Daily Backups
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-backup
+  namespace: velero
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  schedule: "0 2 * * *"  # 2 AM daily
+  template:
+    includedNamespaces:
+      - production
+      - staging
+    excludedResources:
+      - events
+      - events.events.k8s.io
+    storageLocation: default
+    volumeSnapshotLocations:
+      - default
+    ttl: 720h  # 30 days retention
+    snapshotVolumes: true
+    includeClusterResources: true
+    hooks:
+      resources:
+        - name: mysql-backup-hook
+          includedNamespaces:
+            - production
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: mysql
+          pre:
+            - exec:
+                container: mysql
+                command:
+                  - /bin/bash
+                  - -c
+                  - "mysqldump -uroot -p$MYSQL_ROOT_PASSWORD --all-databases > /backup/dump.sql"
+                onError: Fail
+                timeout: 5m
+          post:
+            - exec:
+                container: mysql
+                command:
+                  - /bin/bash
+                  - -c
+                  - "rm -f /backup/dump.sql"
+                onError: Continue
+                timeout: 1m
+
+---
+# Velero Schedule for Hourly Critical Backups
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: hourly-critical-backup
+  namespace: velero
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  schedule: "0 * * * *"  # Every hour
+  template:
+    includedNamespaces:
+      - production
+    labelSelector:
+      matchLabels:
+        backup: critical
+    ttl: 168h  # 7 days retention
+    snapshotVolumes: true
+
+---
+# Backup Storage Location
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: default
+  namespace: velero
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  provider: aws
+  objectStorage:
+    bucket: k8s-backups-bekiryagan
+    prefix: velero
+  config:
+    region: eu-west-1
+    s3ForcePathStyle: "false"
+    s3Url: https://s3.eu-west-1.amazonaws.com
+
+---
+# Volume Snapshot Location
+apiVersion: velero.io/v1
+kind: VolumeSnapshotLocation
+metadata:
+  name: default
+  namespace: velero
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  provider: aws
+  config:
+    region: eu-west-1
+
+---
+# Manual Backup Template
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: manual-backup-template
+  namespace: velero
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  includedNamespaces:
+    - production
+    - staging
+    - monitoring
+  excludedResources:
+    - events
+    - events.events.k8s.io
+  storageLocation: default
+  volumeSnapshotLocations:
+    - default
+  ttl: 720h
+  snapshotVolumes: true
+  includeClusterResources: true
+
+---
+# Restore Template
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: restore-template
+  namespace: velero
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  backupName: daily-backup-20240101000000  # Replace with actual backup name
+  includedNamespaces:
+    - production
+  restorePVs: true
+  preserveNodePorts: true
+
+---
+# =============================================================================
+# Database Backup CronJob (Alternative to Velero hooks)
+# =============================================================================
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mysql-backup
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql-backup
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  schedule: "0 1 * * *"  # 1 AM daily
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: mysql-backup
+        spec:
+          serviceAccountName: backup-sa
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+          containers:
+            - name: backup
+              image: mysql:8.0
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  BACKUP_FILE="/backup/mysql_backup_${TIMESTAMP}.sql.gz"
+                  
+                  echo "Starting MySQL backup..."
+                  mysqldump -h $MYSQL_HOST -u $MYSQL_USER -p$MYSQL_PASSWORD \
+                    --all-databases \
+                    --single-transaction \
+                    --quick \
+                    --lock-tables=false \
+                    | gzip > ${BACKUP_FILE}
+                  
+                  echo "Backup completed: ${BACKUP_FILE}"
+                  
+                  # Upload to S3
+                  aws s3 cp ${BACKUP_FILE} s3://k8s-backups-bekiryagan/mysql/${BACKUP_FILE}
+                  
+                  # Cleanup old backups (keep last 7 days)
+                  find /backup -name "*.sql.gz" -mtime +7 -delete
+                  
+                  echo "Backup uploaded to S3"
+              env:
+                - name: MYSQL_HOST
+                  value: mysql-primary.production.svc.cluster.local
+                - name: MYSQL_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: mysql-secrets
+                      key: root-user
+                - name: MYSQL_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: mysql-secrets
+                      key: root-password
+                - name: AWS_DEFAULT_REGION
+                  value: eu-west-1
+              volumeMounts:
+                - name: backup-volume
+                  mountPath: /backup
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+          volumes:
+            - name: backup-volume
+              persistentVolumeClaim:
+                claimName: backup-pvc
+          restartPolicy: OnFailure
+
+---
+# PVC for Backup Storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-pvc
+  namespace: production
+  labels:
+    app.kubernetes.io/name: backup
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 50Gi
+
+---
+# Service Account for Backup Jobs
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backup-sa
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/k8s-backup-role

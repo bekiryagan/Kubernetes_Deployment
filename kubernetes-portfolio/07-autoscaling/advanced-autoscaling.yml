@@ -1,0 +1,351 @@
+# =============================================================================
+# Advanced Autoscaling - HPA, VPA, KEDA, and Cluster Autoscaler
+# Author: bekiryagan
+# Description: Complete autoscaling solution for Kubernetes
+# =============================================================================
+
+---
+# =============================================================================
+# Horizontal Pod Autoscaler (HPA) with Custom Metrics
+# =============================================================================
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fastapi-hpa-advanced
+  namespace: production
+  labels:
+    app.kubernetes.io/name: fastapi
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fastapi
+  
+  minReplicas: 3
+  maxReplicas: 50
+  
+  metrics:
+    # CPU-based scaling
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    
+    # Memory-based scaling
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    
+    # Custom metric: requests per second
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "1000"
+    
+    # External metric: queue length
+    - type: External
+      external:
+        metric:
+          name: redis_queue_length
+          selector:
+            matchLabels:
+              queue: "fastapi-tasks"
+        target:
+          type: AverageValue
+          averageValue: "30"
+  
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+
+---
+# =============================================================================
+# Vertical Pod Autoscaler (VPA)
+# =============================================================================
+
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: fastapi-vpa
+  namespace: production
+  labels:
+    app.kubernetes.io/name: fastapi
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fastapi
+  
+  updatePolicy:
+    updateMode: "Auto"  # Options: Off, Initial, Recreate, Auto
+  
+  resourcePolicy:
+    containerPolicies:
+      - containerName: fastapi
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        maxAllowed:
+          cpu: 4
+          memory: 8Gi
+        controlledResources: ["cpu", "memory"]
+        controlledValues: RequestsAndLimits
+
+---
+# VPA for MySQL (Recommendations only)
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: mysql-vpa
+  namespace: production
+  labels:
+    app.kubernetes.io/name: mysql
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: mysql
+  
+  updatePolicy:
+    updateMode: "Off"  # Only recommendations, no auto-update for databases
+  
+  resourcePolicy:
+    containerPolicies:
+      - containerName: mysql
+        minAllowed:
+          cpu: 500m
+          memory: 1Gi
+        maxAllowed:
+          cpu: 8
+          memory: 32Gi
+
+---
+# =============================================================================
+# KEDA - Kubernetes Event-Driven Autoscaling
+# =============================================================================
+
+# KEDA ScaledObject for queue-based scaling
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: fastapi-keda-scaler
+  namespace: production
+  labels:
+    app.kubernetes.io/name: fastapi
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  scaleTargetRef:
+    name: fastapi
+    kind: Deployment
+  
+  pollingInterval: 15
+  cooldownPeriod: 300
+  
+  minReplicaCount: 3
+  maxReplicaCount: 100
+  
+  fallback:
+    failureThreshold: 3
+    replicas: 5
+  
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Percent
+              value: 10
+              periodSeconds: 60
+  
+  triggers:
+    # Redis queue trigger
+    - type: redis
+      metadata:
+        address: redis-master.production.svc.cluster.local:6379
+        listName: fastapi-task-queue
+        listLength: "50"
+      authenticationRef:
+        name: redis-trigger-auth
+    
+    # Prometheus metric trigger
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        metricName: http_requests_total
+        threshold: "100"
+        query: sum(rate(http_requests_total{app="fastapi"}[2m]))
+    
+    # Cron-based scaling for predictable traffic
+    - type: cron
+      metadata:
+        timezone: UTC
+        start: 0 8 * * *   # 8 AM UTC
+        end: 0 18 * * *    # 6 PM UTC
+        desiredReplicas: "10"
+
+---
+# KEDA TriggerAuthentication for Redis
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: redis-trigger-auth
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: redis-secrets
+      key: redis-password
+
+---
+# KEDA ScaledJob for batch processing
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: batch-processor
+  namespace: production
+  labels:
+    app.kubernetes.io/name: batch-processor
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  jobTargetRef:
+    parallelism: 1
+    completions: 1
+    backoffLimit: 3
+    template:
+      spec:
+        containers:
+          - name: processor
+            image: bekiryagan/batch-processor:latest
+            env:
+              - name: REDIS_HOST
+                value: redis-master.production.svc.cluster.local
+              - name: REDIS_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: redis-secrets
+                    key: redis-password
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+              limits:
+                cpu: 2000m
+                memory: 2Gi
+        restartPolicy: Never
+  
+  pollingInterval: 30
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  maxReplicaCount: 20
+  
+  triggers:
+    - type: redis
+      metadata:
+        address: redis-master.production.svc.cluster.local:6379
+        listName: batch-jobs-queue
+        listLength: "5"
+      authenticationRef:
+        name: redis-trigger-auth
+
+---
+# =============================================================================
+# Cluster Autoscaler Configuration
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-autoscaler-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: cluster-autoscaler
+    app.kubernetes.io/managed-by: bekiryagan
+data:
+  # Cluster Autoscaler parameters
+  cluster-autoscaler-config: |
+    {
+      "scan-interval": "10s",
+      "scale-down-enabled": true,
+      "scale-down-delay-after-add": "10m",
+      "scale-down-delay-after-delete": "0s",
+      "scale-down-delay-after-failure": "3m",
+      "scale-down-unneeded-time": "10m",
+      "scale-down-unready-time": "20m",
+      "scale-down-utilization-threshold": "0.5",
+      "max-graceful-termination-sec": "600",
+      "balance-similar-node-groups": true,
+      "expander": "least-waste",
+      "skip-nodes-with-local-storage": false,
+      "skip-nodes-with-system-pods": true,
+      "max-node-provision-time": "15m",
+      "max-nodes-total": "100"
+    }
+
+---
+# Priority Classes for Pod Priority
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+value: 1000000
+globalDefault: false
+description: "High priority for critical workloads"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: medium-priority
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+value: 500000
+globalDefault: true
+description: "Default priority for standard workloads"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+value: 100000
+globalDefault: false
+preemptionPolicy: Never
+description: "Low priority for batch and non-critical workloads"

@@ -1,0 +1,216 @@
+# =============================================================================
+# Multi-Cluster Configuration
+# Author: bekiryagan
+# Description: Multi-cluster setup with Kubernetes Federation
+# =============================================================================
+
+---
+# KubeFed FederatedDeployment
+apiVersion: types.kubefed.io/v1beta1
+kind: FederatedDeployment
+metadata:
+  name: fastapi-federated
+  namespace: production
+  labels:
+    app.kubernetes.io/name: fastapi
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fastapi
+    spec:
+      replicas: 3
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: fastapi
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: fastapi
+        spec:
+          containers:
+            - name: fastapi
+              image: bekiryagan/fastapi-app:1.0.0
+              ports:
+                - containerPort: 8000
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 1000m
+                  memory: 1Gi
+  placement:
+    clusters:
+      - name: cluster-eu-west
+      - name: cluster-us-east
+      - name: cluster-ap-south
+  overrides:
+    - clusterName: cluster-eu-west
+      clusterOverrides:
+        - path: "/spec/replicas"
+          value: 5
+    - clusterName: cluster-us-east
+      clusterOverrides:
+        - path: "/spec/replicas"
+          value: 3
+    - clusterName: cluster-ap-south
+      clusterOverrides:
+        - path: "/spec/replicas"
+          value: 2
+
+---
+# KubeFed FederatedService
+apiVersion: types.kubefed.io/v1beta1
+kind: FederatedService
+metadata:
+  name: fastapi-federated
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fastapi
+    spec:
+      type: ClusterIP
+      ports:
+        - name: http
+          port: 80
+          targetPort: 8000
+      selector:
+        app.kubernetes.io/name: fastapi
+  placement:
+    clusters:
+      - name: cluster-eu-west
+      - name: cluster-us-east
+      - name: cluster-ap-south
+
+---
+# KubeFed FederatedConfigMap
+apiVersion: types.kubefed.io/v1beta1
+kind: FederatedConfigMap
+metadata:
+  name: fastapi-config-federated
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  template:
+    data:
+      APP_NAME: "User API"
+      LOG_LEVEL: "INFO"
+  placement:
+    clusters:
+      - name: cluster-eu-west
+      - name: cluster-us-east
+      - name: cluster-ap-south
+  overrides:
+    - clusterName: cluster-eu-west
+      clusterOverrides:
+        - path: "/data/REGION"
+          value: "eu-west-1"
+    - clusterName: cluster-us-east
+      clusterOverrides:
+        - path: "/data/REGION"
+          value: "us-east-1"
+    - clusterName: cluster-ap-south
+      clusterOverrides:
+        - path: "/data/REGION"
+          value: "ap-south-1"
+
+---
+# =============================================================================
+# Multi-Cluster Ingress (GKE specific)
+# =============================================================================
+
+apiVersion: networking.gke.io/v1
+kind: MultiClusterIngress
+metadata:
+  name: fastapi-mci
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+  annotations:
+    networking.gke.io/static-ip: fastapi-global-ip
+spec:
+  template:
+    spec:
+      backend:
+        serviceName: fastapi-mcs
+        servicePort: 80
+      rules:
+        - host: api.example.com
+          http:
+            paths:
+              - path: /*
+                backend:
+                  serviceName: fastapi-mcs
+                  servicePort: 80
+
+---
+# Multi-Cluster Service
+apiVersion: networking.gke.io/v1
+kind: MultiClusterService
+metadata:
+  name: fastapi-mcs
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  template:
+    spec:
+      selector:
+        app.kubernetes.io/name: fastapi
+      ports:
+        - name: http
+          port: 80
+          targetPort: 8000
+
+---
+# =============================================================================
+# Cluster Configuration
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+data:
+  clusters.yaml: |
+    clusters:
+      - name: cluster-eu-west
+        region: eu-west-1
+        provider: aws
+        context: arn:aws:eks:eu-west-1:123456789012:cluster/prod-eu
+        primary: true
+        weight: 50
+        
+      - name: cluster-us-east
+        region: us-east-1
+        provider: aws
+        context: arn:aws:eks:us-east-1:123456789012:cluster/prod-us
+        primary: false
+        weight: 30
+        
+      - name: cluster-ap-south
+        region: ap-south-1
+        provider: aws
+        context: arn:aws:eks:ap-south-1:123456789012:cluster/prod-ap
+        primary: false
+        weight: 20
+    
+    failover:
+      enabled: true
+      healthCheckInterval: 30s
+      unhealthyThreshold: 3
+      
+    dns:
+      provider: route53
+      hostedZoneId: Z1234567890ABC
+      domain: example.com

@@ -1,0 +1,206 @@
+# =============================================================================
+# Flux GitOps Configuration
+# Author: bekiryagan
+# Description: Alternative GitOps setup using Flux v2
+# =============================================================================
+
+---
+# Flux GitRepository
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: kubernetes-portfolio
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  interval: 1m
+  url: https://github.com/bekiryagan/kubernetes-portfolio
+  ref:
+    branch: main
+  secretRef:
+    name: github-credentials
+
+---
+# Flux Kustomization for Infrastructure
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infrastructure
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  interval: 10m
+  sourceRef:
+    kind: GitRepository
+    name: kubernetes-portfolio
+  path: ./01-core-infrastructure
+  prune: true
+  wait: true
+  timeout: 5m
+  healthChecks:
+    - apiVersion: v1
+      kind: Namespace
+      name: production
+    - apiVersion: v1
+      kind: Namespace
+      name: staging
+
+---
+# Flux Kustomization for Applications
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: applications
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  interval: 5m
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: kubernetes-portfolio
+  path: ./02-microservices-app
+  prune: true
+  wait: true
+  timeout: 10m
+  postBuild:
+    substitute:
+      ENVIRONMENT: production
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: fastapi
+      namespace: production
+
+---
+# Flux Kustomization for Monitoring
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: monitoring
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  interval: 10m
+  dependsOn:
+    - name: infrastructure
+  sourceRef:
+    kind: GitRepository
+    name: kubernetes-portfolio
+  path: ./04-observability-stack
+  prune: true
+  wait: true
+  timeout: 10m
+
+---
+# Flux HelmRepository for Bitnami
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: HelmRepository
+metadata:
+  name: bitnami
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  interval: 30m
+  url: https://charts.bitnami.com/bitnami
+
+---
+# Flux HelmRelease for MySQL
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: mysql
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: mysql
+      version: "9.x"
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+        namespace: flux-system
+  values:
+    auth:
+      rootPassword: datascientest1234
+      database: Main
+    primary:
+      persistence:
+        enabled: true
+        size: 50Gi
+    metrics:
+      enabled: true
+
+---
+# Flux HelmRelease for Redis
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: redis
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: redis
+      version: "18.x"
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+        namespace: flux-system
+  values:
+    auth:
+      enabled: true
+      password: redis-secure-password
+    master:
+      persistence:
+        enabled: true
+        size: 10Gi
+    metrics:
+      enabled: true
+
+---
+# Flux Notification Provider (Slack)
+apiVersion: notification.toolkit.fluxcd.io/v1beta2
+kind: Provider
+metadata:
+  name: slack
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  type: slack
+  channel: deployments
+  secretRef:
+    name: slack-webhook
+
+---
+# Flux Alert
+apiVersion: notification.toolkit.fluxcd.io/v1beta2
+kind: Alert
+metadata:
+  name: deployment-alerts
+  namespace: flux-system
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  providerRef:
+    name: slack
+  eventSeverity: info
+  eventSources:
+    - kind: Kustomization
+      name: '*'
+    - kind: HelmRelease
+      name: '*'
+  summary: "Flux deployment notification"

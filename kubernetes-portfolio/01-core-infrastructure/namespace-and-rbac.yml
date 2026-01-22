@@ -1,0 +1,496 @@
+# =============================================================================
+# CORE INFRASTRUCTURE - Namespaces, RBAC, Resource Quotas, Limit Ranges
+# =============================================================================
+# This file establishes the foundational infrastructure for a multi-tenant
+# Kubernetes cluster with proper isolation, resource management, and security.
+#
+# Author: Senior Platform Engineer
+# Version: 2.0.0
+# Last Updated: 2024
+# =============================================================================
+
+---
+# =============================================================================
+# NAMESPACES - Logical isolation for different environments and teams
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    environment: production
+    team: platform
+    cost-center: engineering
+    # Pod Security Standards - Enforce restricted policy
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    # Contact information for namespace owners
+    owner: "platform-team@company.com"
+    description: "Production workloads - critical business applications"
+    # Compliance and governance
+    compliance.company.com/pci-dss: "true"
+    compliance.company.com/soc2: "true"
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  labels:
+    environment: staging
+    team: platform
+    cost-center: engineering
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+  annotations:
+    owner: "platform-team@company.com"
+    description: "Staging environment for pre-production testing"
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: development
+  labels:
+    environment: development
+    team: platform
+    cost-center: engineering
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    owner: "dev-team@company.com"
+    description: "Development environment for feature testing"
+
+---
+# =============================================================================
+# RESOURCE QUOTAS - Prevent resource exhaustion and ensure fair usage
+# =============================================================================
+
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: production-quota
+  namespace: production
+spec:
+  hard:
+    # Compute Resources
+    requests.cpu: "100"           # Total CPU requests across all pods
+    requests.memory: "200Gi"      # Total memory requests
+    limits.cpu: "200"             # Total CPU limits
+    limits.memory: "400Gi"        # Total memory limits
+    
+    # Storage Resources
+    requests.storage: "500Gi"     # Total PVC storage
+    persistentvolumeclaims: "50"  # Maximum number of PVCs
+    
+    # Object Counts
+    pods: "200"                   # Maximum number of pods
+    services: "50"                # Maximum number of services
+    secrets: "100"                # Maximum number of secrets
+    configmaps: "100"             # Maximum number of configmaps
+    replicationcontrollers: "0"   # Deprecated - use Deployments
+    
+    # Service Types
+    services.loadbalancers: "10"  # Limit expensive load balancers
+    services.nodeports: "0"       # Disable NodePorts for security
+    
+    # Extended Resources (GPUs, custom resources)
+    requests.nvidia.com/gpu: "8"  # GPU allocation limit
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: staging-quota
+  namespace: staging
+spec:
+  hard:
+    requests.cpu: "50"
+    requests.memory: "100Gi"
+    limits.cpu: "100"
+    limits.memory: "200Gi"
+    pods: "100"
+    services: "30"
+    persistentvolumeclaims: "25"
+    requests.storage: "200Gi"
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: development-quota
+  namespace: development
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: "40Gi"
+    limits.cpu: "40"
+    limits.memory: "80Gi"
+    pods: "50"
+    services: "20"
+    persistentvolumeclaims: "10"
+    requests.storage: "50Gi"
+
+---
+# =============================================================================
+# LIMIT RANGES - Default and maximum resource constraints per container/pod
+# =============================================================================
+
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: production-limits
+  namespace: production
+spec:
+  limits:
+    # Default limits for containers that don't specify resources
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "8"
+        memory: "16Gi"
+      min:
+        cpu: "10m"
+        memory: "16Mi"
+      # Prevent users from setting limits much higher than requests
+      maxLimitRequestRatio:
+        cpu: "10"
+        memory: "4"
+    
+    # Pod-level limits
+    - type: Pod
+      max:
+        cpu: "32"
+        memory: "64Gi"
+      min:
+        cpu: "10m"
+        memory: "16Mi"
+    
+    # PVC limits
+    - type: PersistentVolumeClaim
+      max:
+        storage: "100Gi"
+      min:
+        storage: "1Gi"
+
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: staging-limits
+  namespace: staging
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "250m"
+        memory: "256Mi"
+      defaultRequest:
+        cpu: "50m"
+        memory: "64Mi"
+      max:
+        cpu: "4"
+        memory: "8Gi"
+      min:
+        cpu: "10m"
+        memory: "16Mi"
+
+---
+# =============================================================================
+# RBAC - Role-Based Access Control
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# ClusterRoles - Cluster-wide permissions
+# -----------------------------------------------------------------------------
+
+# Read-only access for developers across all namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: developer-readonly
+  labels:
+    rbac.company.com/aggregate-to-developer: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "endpoints", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+
+---
+# Full access for DevOps engineers
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: devops-engineer
+  labels:
+    rbac.company.com/aggregate-to-devops: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["apps"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["batch"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["autoscaling"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["*"]
+  # Explicitly deny dangerous operations
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    # Note: delete is intentionally not included
+
+---
+# SRE/Platform team with elevated permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-admin
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+  - nonResourceURLs: ["*"]
+    verbs: ["*"]
+
+---
+# -----------------------------------------------------------------------------
+# Namespace-scoped Roles
+# -----------------------------------------------------------------------------
+
+# Developer role for specific namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+  namespace: development
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward", "pods/log"]
+    verbs: ["get", "create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# Restricted role for CI/CD pipelines
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-cd-deployer
+  namespace: production
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+    # Only allow updating existing deployments, not creating new ones
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/rollback"]
+    verbs: ["create"]
+
+---
+# -----------------------------------------------------------------------------
+# Service Accounts
+# -----------------------------------------------------------------------------
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: application-sa
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: platform-team
+  annotations:
+    # AWS IRSA annotation
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/production-app-role"
+    # GCP Workload Identity annotation
+    iam.gke.io/gcp-service-account: "app@project.iam.gserviceaccount.com"
+automountServiceAccountToken: false  # Security: Don't auto-mount tokens
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-cd-sa
+  namespace: production
+  annotations:
+    description: "Service account for CI/CD pipeline deployments"
+automountServiceAccountToken: true
+
+---
+# -----------------------------------------------------------------------------
+# RoleBindings and ClusterRoleBindings
+# -----------------------------------------------------------------------------
+
+# Bind developers to read-only cluster role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: developers-readonly
+subjects:
+  - kind: Group
+    name: developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: developer-readonly
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Bind DevOps team to devops-engineer role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: devops-team
+subjects:
+  - kind: Group
+    name: devops
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: devops-engineer
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Bind platform team to admin role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-admins
+subjects:
+  - kind: Group
+    name: platform-team
+    apiGroup: rbac.authorization.k8s.io
+  - kind: User
+    name: john.doe@company.com
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: platform-admin
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Namespace-specific binding for CI/CD
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-cd-deployer-binding
+  namespace: production
+subjects:
+  - kind: ServiceAccount
+    name: ci-cd-sa
+    namespace: production
+roleRef:
+  kind: Role
+  name: ci-cd-deployer
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Developer access to development namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developer-access
+  namespace: development
+subjects:
+  - kind: Group
+    name: developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: developer
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# =============================================================================
+# PRIORITY CLASSES - Pod scheduling priority
+# =============================================================================
+
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: critical-production
+  labels:
+    tier: critical
+globalDefault: false
+value: 1000000
+preemptionPolicy: PreemptLowerPriority
+description: "Critical production workloads that cannot be preempted"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+globalDefault: false
+value: 750000
+preemptionPolicy: PreemptLowerPriority
+description: "High priority production workloads"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: default-priority
+globalDefault: true
+value: 500000
+preemptionPolicy: PreemptLowerPriority
+description: "Default priority for standard workloads"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority-batch
+globalDefault: false
+value: 100000
+preemptionPolicy: Never
+description: "Low priority batch jobs that should not preempt other workloads"

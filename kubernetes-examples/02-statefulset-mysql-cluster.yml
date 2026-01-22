@@ -1,0 +1,365 @@
+# =============================================================================
+# MYSQL STATEFULSET CLUSTER WITH REPLICATION
+# =============================================================================
+# This example demonstrates:
+# - StatefulSet for database workloads
+# - Persistent Volume Claims with storage class
+# - Headless service for pod DNS
+# - Init containers for replication setup
+# - ConfigMap for MySQL configuration
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: database
+  labels:
+    name: database
+    environment: production
+
+---
+# =============================================================================
+# CONFIGMAP FOR MYSQL CONFIGURATION
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: database
+data:
+  primary.cnf: |
+    [mysqld]
+    log-bin=mysql-bin
+    server-id=1
+    binlog_format=ROW
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    log_slave_updates=ON
+    
+    # Performance tuning
+    innodb_buffer_pool_size=1G
+    innodb_log_file_size=256M
+    innodb_flush_log_at_trx_commit=1
+    sync_binlog=1
+    
+    # Connection settings
+    max_connections=500
+    wait_timeout=28800
+    interactive_timeout=28800
+
+  replica.cnf: |
+    [mysqld]
+    super-read-only=ON
+    server-id=2
+    log-bin=mysql-bin
+    binlog_format=ROW
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    log_slave_updates=ON
+    read_only=ON
+    
+    # Performance tuning
+    innodb_buffer_pool_size=1G
+    innodb_log_file_size=256M
+
+---
+# =============================================================================
+# SECRET FOR MYSQL CREDENTIALS
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secrets
+  namespace: database
+type: Opaque
+stringData:
+  root-password: "StrongRootPassword123!"
+  replication-user: "repl_user"
+  replication-password: "StrongReplPassword456!"
+  app-user: "app_user"
+  app-password: "StrongAppPassword789!"
+
+---
+# =============================================================================
+# HEADLESS SERVICE FOR STATEFULSET
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+  namespace: database
+  labels:
+    app: mysql
+spec:
+  ports:
+    - port: 3306
+      name: mysql
+  clusterIP: None
+  selector:
+    app: mysql
+
+---
+# =============================================================================
+# REGULAR SERVICE FOR READ/WRITE SPLITTING
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-primary
+  namespace: database
+  labels:
+    app: mysql
+    role: primary
+spec:
+  ports:
+    - port: 3306
+      targetPort: 3306
+      name: mysql
+  selector:
+    app: mysql
+    role: primary
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-read
+  namespace: database
+  labels:
+    app: mysql
+spec:
+  ports:
+    - port: 3306
+      targetPort: 3306
+      name: mysql
+  selector:
+    app: mysql
+
+---
+# =============================================================================
+# STATEFULSET FOR MYSQL CLUSTER
+# =============================================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: database
+  labels:
+    app: mysql
+spec:
+  serviceName: mysql-headless
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9104"
+    spec:
+      terminationGracePeriodSeconds: 60
+      
+      initContainers:
+        # Init container to configure MySQL based on ordinal
+        - name: init-mysql
+          image: mysql:8.0
+          command:
+            - bash
+            - "-c"
+            - |
+              set -ex
+              # Get server-id from pod ordinal
+              [[ $(hostname) =~ -([0-9]+)$ ]] || exit 1
+              ordinal=${BASH_REMATCH[1]}
+              
+              # Copy appropriate config based on ordinal
+              if [[ $ordinal -eq 0 ]]; then
+                cp /mnt/config-map/primary.cnf /mnt/conf.d/server.cnf
+                echo "role=primary" > /mnt/conf.d/role
+              else
+                cp /mnt/config-map/replica.cnf /mnt/conf.d/server.cnf
+                echo "role=replica" > /mnt/conf.d/role
+              fi
+              
+              # Add server-id to config
+              echo "server-id=$((100 + $ordinal))" >> /mnt/conf.d/server.cnf
+          volumeMounts:
+            - name: conf
+              mountPath: /mnt/conf.d
+            - name: config-map
+              mountPath: /mnt/config-map
+
+        # Init container to clone data from predecessor
+        - name: clone-mysql
+          image: gcr.io/google-samples/xtrabackup:1.0
+          command:
+            - bash
+            - "-c"
+            - |
+              set -ex
+              # Skip clone if data exists or if primary
+              [[ -d /var/lib/mysql/mysql ]] && exit 0
+              [[ $(hostname) =~ -([0-9]+)$ ]] || exit 1
+              ordinal=${BASH_REMATCH[1]}
+              [[ $ordinal -eq 0 ]] && exit 0
+              
+              # Clone from previous pod
+              ncat --recv-only mysql-$((ordinal-1)).mysql-headless 3307 | xbstream -x -C /var/lib/mysql
+              xtrabackup --prepare --target-dir=/var/lib/mysql
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+              subPath: mysql
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          ports:
+            - containerPort: 3306
+              name: mysql
+          
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+            - name: MYSQL_REPLICATION_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: replication-user
+            - name: MYSQL_REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: replication-password
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -u
+                - root
+                - -p${MYSQL_ROOT_PASSWORD}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+          readinessProbe:
+            exec:
+              command:
+                - mysql
+                - -u
+                - root
+                - -p${MYSQL_ROOT_PASSWORD}
+                - -e
+                - "SELECT 1"
+            initialDelaySeconds: 5
+            periodSeconds: 2
+            timeoutSeconds: 1
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+              subPath: mysql
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+
+        # Sidecar for xtrabackup
+        - name: xtrabackup
+          image: gcr.io/google-samples/xtrabackup:1.0
+          ports:
+            - containerPort: 3307
+              name: xtrabackup
+          command:
+            - bash
+            - "-c"
+            - |
+              set -ex
+              cd /var/lib/mysql
+              
+              # Start a server to send backups
+              exec ncat --listen --keep-open --send-only --max-conns=1 3307 -c \
+                "xtrabackup --backup --slave-info --stream=xbstream --host=127.0.0.1 --user=root --password=$MYSQL_ROOT_PASSWORD"
+          
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "100Mi"
+            limits:
+              cpu: "500m"
+              memory: "500Mi"
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+              subPath: mysql
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+
+        # MySQL Exporter for Prometheus
+        - name: mysql-exporter
+          image: prom/mysqld-exporter:v0.14.0
+          ports:
+            - containerPort: 9104
+              name: metrics
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+            - name: DATA_SOURCE_NAME
+              value: "root:$(MYSQL_ROOT_PASSWORD)@(localhost:3306)/"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+
+      volumes:
+        - name: conf
+          emptyDir: {}
+        - name: config-map
+          configMap:
+            name: mysql-config
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: mysql
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 50Gi

@@ -1,0 +1,385 @@
+# =============================================================================
+# MySQL StatefulSet with Replication
+# Author: Bekir Yagan
+# =============================================================================
+# Production MySQL cluster with:
+# - Primary-Replica replication
+# - Persistent storage
+# - Automatic failover ready
+# - Backup integration hooks
+# =============================================================================
+
+---
+# MySQL Primary StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql-primary
+  namespace: database
+  labels:
+    app: mysql
+    role: primary
+spec:
+  serviceName: mysql-primary
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+      role: primary
+  template:
+    metadata:
+      labels:
+        app: mysql
+        role: primary
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9104"
+    spec:
+      serviceAccountName: mysql-sa
+      terminationGracePeriodSeconds: 60
+      
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      
+      initContainers:
+        - name: init-mysql
+          image: mysql:8.0
+          command:
+            - bash
+            - -c
+            - |
+              # Generate server-id based on pod ordinal
+              [[ $HOSTNAME =~ -([0-9]+)$ ]] || exit 1
+              ordinal=${BASH_REMATCH[1]}
+              echo "[mysqld]" > /mnt/conf.d/server-id.cnf
+              echo "server-id=$((100 + ordinal))" >> /mnt/conf.d/server-id.cnf
+              
+              # Copy primary config
+              cp /mnt/config-map/primary.cnf /mnt/conf.d/
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: conf
+              mountPath: /mnt/conf.d
+            - name: config-map
+              mountPath: /mnt/config-map
+          resources:
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+      
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+            - name: MYSQL_DATABASE
+              value: "fastapi_db"
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: user
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: password
+          
+          ports:
+            - name: mysql
+              containerPort: 3306
+          
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+          
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+          
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - |
+                  mysql -h 127.0.0.1 -u root -p$MYSQL_ROOT_PASSWORD -e 'SELECT 1'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+        
+        # MySQL Exporter for Prometheus
+        - name: mysql-exporter
+          image: prom/mysqld-exporter:v0.15.0
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+            - name: DATA_SOURCE_NAME
+              value: "root:$(MYSQL_ROOT_PASSWORD)@(localhost:3306)/"
+          ports:
+            - name: metrics
+              containerPort: 9104
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+      
+      volumes:
+        - name: conf
+          emptyDir: {}
+        - name: config-map
+          configMap:
+            name: mysql-config
+  
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: mysql
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 50Gi
+---
+# MySQL Replica StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql-replica
+  namespace: database
+  labels:
+    app: mysql
+    role: replica
+spec:
+  serviceName: mysql-replica
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mysql
+      role: replica
+  template:
+    metadata:
+      labels:
+        app: mysql
+        role: replica
+    spec:
+      serviceAccountName: mysql-sa
+      terminationGracePeriodSeconds: 60
+      
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      
+      initContainers:
+        - name: init-mysql
+          image: mysql:8.0
+          command:
+            - bash
+            - -c
+            - |
+              [[ $HOSTNAME =~ -([0-9]+)$ ]] || exit 1
+              ordinal=${BASH_REMATCH[1]}
+              echo "[mysqld]" > /mnt/conf.d/server-id.cnf
+              echo "server-id=$((200 + ordinal))" >> /mnt/conf.d/server-id.cnf
+              echo "read-only=1" >> /mnt/conf.d/server-id.cnf
+              cp /mnt/config-map/replica.cnf /mnt/conf.d/
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: conf
+              mountPath: /mnt/conf.d
+            - name: config-map
+              mountPath: /mnt/config-map
+          resources:
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+      
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+          ports:
+            - name: mysql
+              containerPort: 3306
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: conf
+              mountPath: /etc/mysql/conf.d
+          livenessProbe:
+            exec:
+              command: ["mysqladmin", "ping", "-h", "localhost"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - mysql -h 127.0.0.1 -u root -p$MYSQL_ROOT_PASSWORD -e 'SELECT 1'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      
+      volumes:
+        - name: conf
+          emptyDir: {}
+        - name: config-map
+          configMap:
+            name: mysql-config
+  
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 50Gi
+---
+# MySQL Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-primary
+  namespace: database
+  labels:
+    app: mysql
+    role: primary
+spec:
+  type: ClusterIP
+  selector:
+    app: mysql
+    role: primary
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-replica
+  namespace: database
+  labels:
+    app: mysql
+    role: replica
+spec:
+  type: ClusterIP
+  selector:
+    app: mysql
+    role: replica
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+---
+# MySQL Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: database
+data:
+  primary.cnf: |
+    [mysqld]
+    log-bin=mysql-bin
+    binlog-format=ROW
+    binlog-row-image=MINIMAL
+    gtid-mode=ON
+    enforce-gtid-consistency=ON
+    max_connections=500
+    innodb_buffer_pool_size=2G
+    innodb_log_file_size=512M
+    innodb_flush_log_at_trx_commit=1
+    sync_binlog=1
+    character-set-server=utf8mb4
+    collation-server=utf8mb4_unicode_ci
+    slow_query_log=ON
+    slow_query_log_file=/var/lib/mysql/slow.log
+    long_query_time=2
+  
+  replica.cnf: |
+    [mysqld]
+    super-read-only=ON
+    relay-log=mysql-relay-bin
+    log-slave-updates=ON
+    gtid-mode=ON
+    enforce-gtid-consistency=ON
+    innodb_buffer_pool_size=2G
+---
+# MySQL Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secrets
+  namespace: database
+type: Opaque
+stringData:
+  root-password: "REPLACE_IN_PRODUCTION"
+  user: "fastapi_user"
+  password: "REPLACE_IN_PRODUCTION"
+  replication-user: "repl_user"
+  replication-password: "REPLACE_IN_PRODUCTION"
+---
+# Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mysql-sa
+  namespace: database

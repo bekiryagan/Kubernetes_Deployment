@@ -1,0 +1,236 @@
+# =============================================================================
+# Network Policies - Zero Trust Networking
+# Author: Bekir Yagan
+# =============================================================================
+# Implements defense-in-depth network security:
+# - Default deny all traffic
+# - Explicit allow rules for required communication
+# - Namespace isolation
+# =============================================================================
+
+---
+# Default Deny All Ingress - Production
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: production
+  labels:
+    policy: deny-all
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# Default Deny All Egress - Production
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: production
+  labels:
+    policy: deny-all
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+---
+# Allow DNS Resolution (Required for all pods)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Allow FastAPI to receive traffic from Ingress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-fastapi
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: fastapi-app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# Allow FastAPI to connect to Database namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-fastapi-to-database
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: fastapi-app
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              environment: production
+              team: dba
+      ports:
+        - protocol: TCP
+          port: 3306  # MySQL
+        - protocol: TCP
+          port: 6379  # Redis
+---
+# Allow inter-pod communication within same app
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-app-communication
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: fastapi-app
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: fastapi-app
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: fastapi-app
+---
+# Allow Prometheus to scrape metrics
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 8000  # Application metrics port
+        - protocol: TCP
+          port: 9090  # Default metrics port
+---
+# Database Namespace - Allow inbound from production
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-production-to-database
+  namespace: database
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              environment: production
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 6379
+---
+# Database internal replication
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-internal-replication
+  namespace: database
+spec:
+  podSelector:
+    matchLabels:
+      app: mysql
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mysql
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 4567  # Galera replication
+        - protocol: TCP
+          port: 4568
+        - protocol: TCP
+          port: 4444
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mysql
+      ports:
+        - protocol: TCP
+          port: 3306
+        - protocol: TCP
+          port: 4567
+        - protocol: TCP
+          port: 4568
+        - protocol: TCP
+          port: 4444
+---
+# Allow HTTPS egress for external API calls
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-https-egress
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      requires-external-access: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443

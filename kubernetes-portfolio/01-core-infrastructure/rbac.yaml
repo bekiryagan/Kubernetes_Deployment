@@ -1,0 +1,200 @@
+# =============================================================================
+# RBAC Configuration - Role-Based Access Control
+# Author: Bekir Yagan
+# =============================================================================
+# Implements principle of least privilege with:
+# - Cluster roles for common operations
+# - Namespace-scoped roles for workload management
+# - Service accounts for application identities
+# =============================================================================
+
+---
+# Cluster Admin Role - Full cluster access (use sparingly)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-admin-custom
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+# Developer Role - Read-only cluster-wide, write in namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: developer
+  labels:
+    app.kubernetes.io/managed-by: kubernetes
+rules:
+  # Read-only access to cluster resources
+  - apiGroups: [""]
+    resources: ["namespaces", "nodes", "persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  # Read-only for storage classes and priority classes
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+---
+# Namespace Developer Role - Full access within namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: namespace-developer
+  namespace: development
+  labels:
+    app.kubernetes.io/managed-by: kubernetes
+rules:
+  # Full access to core resources
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/exec", "pods/portforward"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["*"]
+  # Full access to workload resources
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["*"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["*"]
+  # Access to networking resources
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["*"]
+  # Access to autoscaling
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["*"]
+---
+# Read-Only Role for Auditors
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: auditor
+  labels:
+    app.kubernetes.io/managed-by: kubernetes
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+# SRE Role - Operations focused permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sre-operator
+  labels:
+    app.kubernetes.io/managed-by: kubernetes
+rules:
+  # Full access to core resources across cluster
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/exec", "services", "endpoints"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Access to workloads
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["*"]
+  # Access to monitoring resources
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+# Service Account for CI/CD Pipeline
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-cd-deployer
+  namespace: production
+  labels:
+    app.kubernetes.io/managed-by: kubernetes
+    app.kubernetes.io/component: ci-cd
+---
+# Role for CI/CD deployments
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-cd-deployer
+  namespace: production
+rules:
+  # Deploy applications
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Manage services
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Read secrets (not create for security)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  # Manage ingress
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+# Bind CI/CD role to service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-cd-deployer-binding
+  namespace: production
+subjects:
+  - kind: ServiceAccount
+    name: ci-cd-deployer
+    namespace: production
+roleRef:
+  kind: Role
+  name: ci-cd-deployer
+  apiGroup: rbac.authorization.k8s.io
+---
+# Application Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fastapi-app
+  namespace: production
+  labels:
+    app.kubernetes.io/name: fastapi-app
+    app.kubernetes.io/managed-by: kubernetes
+automountServiceAccountToken: false  # Security best practice
+---
+# Minimal role for application pod
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fastapi-app-role
+  namespace: production
+rules:
+  # Only allow reading own configmaps
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+    resourceNames: ["fastapi-config"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fastapi-app-binding
+  namespace: production
+subjects:
+  - kind: ServiceAccount
+    name: fastapi-app
+    namespace: production
+roleRef:
+  kind: Role
+  name: fastapi-app-role
+  apiGroup: rbac.authorization.k8s.io

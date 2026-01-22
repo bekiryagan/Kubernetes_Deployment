@@ -1,0 +1,111 @@
+# =============================================================================
+# FastAPI Configuration and Secrets
+# Author: Bekir Yagan
+# =============================================================================
+# ConfigMaps for non-sensitive configuration
+# Secrets placeholder - use External Secrets or Sealed Secrets in production
+# =============================================================================
+
+---
+# Application Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fastapi-config
+  namespace: production
+  labels:
+    app: fastapi-app
+data:
+  # Database configuration
+  DATABASE_HOST: "mysql-primary.database.svc.cluster.local"
+  DATABASE_PORT: "3306"
+  DATABASE_NAME: "fastapi_db"
+  DATABASE_POOL_SIZE: "10"
+  DATABASE_POOL_OVERFLOW: "20"
+  
+  # Redis configuration
+  REDIS_HOST: "redis-master.database.svc.cluster.local"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  
+  # Application settings
+  APP_NAME: "FastAPI Microservice"
+  APP_VERSION: "1.0.0"
+  DEBUG: "false"
+  ALLOWED_HOSTS: "api.example.com,localhost"
+  
+  # Logging
+  LOG_FORMAT: "json"
+  LOG_LEVEL: "INFO"
+  
+  # CORS settings
+  CORS_ORIGINS: "https://app.example.com,https://admin.example.com"
+  CORS_ALLOW_CREDENTIALS: "true"
+  
+  # Rate limiting
+  RATE_LIMIT_REQUESTS: "100"
+  RATE_LIMIT_WINDOW: "60"
+  
+  # Feature flags
+  FEATURE_NEW_API: "true"
+  FEATURE_BETA_USERS: "false"
+---
+# Secrets placeholder - Replace with External Secrets in production
+# This is just a template - never commit real secrets!
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fastapi-secrets
+  namespace: production
+  labels:
+    app: fastapi-app
+  annotations:
+    kubernetes.io/description: "PLACEHOLDER - Use External Secrets Operator in production"
+type: Opaque
+stringData:
+  # Database credentials
+  DATABASE_USER: "fastapi_user"
+  DATABASE_PASSWORD: "REPLACE_WITH_EXTERNAL_SECRET"
+  
+  # Redis credentials
+  REDIS_PASSWORD: "REPLACE_WITH_EXTERNAL_SECRET"
+  
+  # JWT settings
+  JWT_SECRET_KEY: "REPLACE_WITH_EXTERNAL_SECRET"
+  JWT_ALGORITHM: "HS256"
+  JWT_EXPIRATION_HOURS: "24"
+  
+  # API keys
+  API_KEY: "REPLACE_WITH_EXTERNAL_SECRET"
+  
+  # Encryption key for sensitive data
+  ENCRYPTION_KEY: "REPLACE_WITH_EXTERNAL_SECRET"
+---
+# Example External Secret (using External Secrets Operator)
+# Uncomment and configure for production use
+# apiVersion: external-secrets.io/v1beta1
+# kind: ExternalSecret
+# metadata:
+#   name: fastapi-external-secrets
+#   namespace: production
+# spec:
+#   refreshInterval: "1h"
+#   secretStoreRef:
+#     name: aws-secrets-manager
+#     kind: ClusterSecretStore
+#   target:
+#     name: fastapi-secrets
+#     creationPolicy: Owner
+#   data:
+#     - secretKey: DATABASE_PASSWORD
+#       remoteRef:
+#         key: production/fastapi/database
+#         property: password
+#     - secretKey: JWT_SECRET_KEY
+#       remoteRef:
+#         key: production/fastapi/jwt
+#         property: secret
+#     - secretKey: REDIS_PASSWORD
+#       remoteRef:
+#         key: production/fastapi/redis
+#         property: password

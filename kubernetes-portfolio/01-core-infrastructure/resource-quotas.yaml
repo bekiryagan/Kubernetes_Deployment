@@ -1,0 +1,178 @@
+# =============================================================================
+# Resource Quotas - Enforce Resource Limits per Namespace
+# Author: Bekir Yagan
+# =============================================================================
+# Resource quotas prevent runaway resource consumption and ensure fair
+# allocation across teams and workloads.
+# =============================================================================
+
+---
+# Production Resource Quota - High limits for critical workloads
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: production-quota
+  namespace: production
+  labels:
+    environment: production
+spec:
+  hard:
+    # Compute resources
+    requests.cpu: "50"
+    requests.memory: 100Gi
+    limits.cpu: "100"
+    limits.memory: 200Gi
+    # Storage
+    requests.storage: 500Gi
+    persistentvolumeclaims: "50"
+    # Object counts
+    pods: "200"
+    services: "50"
+    secrets: "100"
+    configmaps: "100"
+    replicationcontrollers: "50"
+    services.loadbalancers: "5"
+    services.nodeports: "10"
+---
+# Staging Resource Quota - Medium limits
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: staging-quota
+  namespace: staging
+  labels:
+    environment: staging
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "40"
+    limits.memory: 80Gi
+    requests.storage: 100Gi
+    persistentvolumeclaims: "20"
+    pods: "100"
+    services: "25"
+    secrets: "50"
+    configmaps: "50"
+    services.loadbalancers: "2"
+    services.nodeports: "5"
+---
+# Development Resource Quota - Lower limits
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: development-quota
+  namespace: development
+  labels:
+    environment: development
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 20Gi
+    limits.cpu: "20"
+    limits.memory: 40Gi
+    requests.storage: 50Gi
+    persistentvolumeclaims: "10"
+    pods: "50"
+    services: "15"
+    secrets: "30"
+    configmaps: "30"
+    services.loadbalancers: "1"
+    services.nodeports: "3"
+---
+# Monitoring Quota - For observability stack
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: monitoring-quota
+  namespace: monitoring
+  labels:
+    environment: production
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 30Gi
+    limits.cpu: "20"
+    limits.memory: 60Gi
+    requests.storage: 200Gi  # More storage for metrics
+    persistentvolumeclaims: "15"
+    pods: "50"
+    services: "20"
+    secrets: "30"
+    configmaps: "30"
+---
+# Limit Range - Default and maximum limits per container
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: production-limits
+  namespace: production
+spec:
+  limits:
+    # Container limits
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "4"
+        memory: "8Gi"
+      min:
+        cpu: "50m"
+        memory: "64Mi"
+    # Pod limits
+    - type: Pod
+      max:
+        cpu: "8"
+        memory: "16Gi"
+    # PVC limits
+    - type: PersistentVolumeClaim
+      max:
+        storage: 100Gi
+      min:
+        storage: 1Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: staging-limits
+  namespace: staging
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "250m"
+        memory: "256Mi"
+      defaultRequest:
+        cpu: "50m"
+        memory: "64Mi"
+      max:
+        cpu: "2"
+        memory: "4Gi"
+      min:
+        cpu: "25m"
+        memory: "32Mi"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: development-limits
+  namespace: development
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "200m"
+        memory: "256Mi"
+      defaultRequest:
+        cpu: "50m"
+        memory: "64Mi"
+      max:
+        cpu: "1"
+        memory: "2Gi"
+      min:
+        cpu: "10m"
+        memory: "16Mi"

@@ -1,0 +1,114 @@
+# =============================================================================
+# FastAPI Service and Ingress Configuration
+# Author: Bekir Yagan
+# =============================================================================
+# Exposes the FastAPI application with:
+# - ClusterIP service for internal communication
+# - Ingress with TLS termination
+# - Health check annotations
+# =============================================================================
+
+---
+# ClusterIP Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-app
+  namespace: production
+  labels:
+    app: fastapi-app
+    app.kubernetes.io/name: fastapi-app
+    app.kubernetes.io/component: api
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+spec:
+  type: ClusterIP
+  selector:
+    app: fastapi-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+  sessionAffinity: None
+---
+# Headless Service for direct pod access
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-app-headless
+  namespace: production
+  labels:
+    app: fastapi-app
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: fastapi-app
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+# Ingress with TLS
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fastapi-app
+  namespace: production
+  labels:
+    app: fastapi-app
+  annotations:
+    # Nginx ingress annotations
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+    # CORS
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://app.example.com"
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # cert-manager for automatic TLS
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.example.com
+      secretName: fastapi-tls
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastapi-app
+                port:
+                  number: 80
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fastapi-app-pdb
+  namespace: production
+  labels:
+    app: fastapi-app
+spec:
+  minAvailable: 2  # Or use maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: fastapi-app

@@ -1,0 +1,236 @@
+# =============================================================================
+# ArgoCD GitOps Configuration
+# Author: bekiryagan
+# Description: GitOps deployment pipeline with ArgoCD
+# =============================================================================
+
+---
+# ArgoCD Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+  labels:
+    name: argocd
+    app.kubernetes.io/managed-by: bekiryagan
+
+---
+# ArgoCD Application - FastAPI
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fastapi-app
+  namespace: argocd
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/bekiryagan/kubernetes-portfolio.git
+    targetRevision: main
+    path: 02-microservices-app
+    
+    # Kustomize options (if using Kustomize)
+    # kustomize:
+    #   namePrefix: prod-
+    #   commonLabels:
+    #     environment: production
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  
+  # Health checks
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
+---
+# ArgoCD Application - Monitoring Stack
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring-stack
+  namespace: argocd
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/bekiryagan/kubernetes-portfolio.git
+    targetRevision: main
+    path: 04-observability-stack
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+---
+# ArgoCD Application - Database Clusters
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: database-clusters
+  namespace: argocd
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/bekiryagan/kubernetes-portfolio.git
+    targetRevision: main
+    path: 03-database-clusters
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  
+  syncPolicy:
+    automated:
+      prune: false  # Don't auto-prune databases
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+---
+# ArgoCD AppProject for production workloads
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: production
+  namespace: argocd
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+spec:
+  description: "Production applications"
+  
+  # Source repositories
+  sourceRepos:
+    - https://github.com/bekiryagan/kubernetes-portfolio.git
+    - https://github.com/bekiryagan/*
+  
+  # Destination clusters and namespaces
+  destinations:
+    - namespace: production
+      server: https://kubernetes.default.svc
+    - namespace: monitoring
+      server: https://kubernetes.default.svc
+  
+  # Cluster resources allowed
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+  
+  # Namespace resources allowed
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  
+  # Roles
+  roles:
+    - name: developer
+      description: "Developer role for production project"
+      policies:
+        - p, proj:production:developer, applications, get, production/*, allow
+        - p, proj:production:developer, applications, sync, production/*, allow
+      groups:
+        - developers
+
+---
+# ArgoCD Repository Secret (for private repos)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: private-repo-creds
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+    app.kubernetes.io/managed-by: bekiryagan
+type: Opaque
+stringData:
+  type: git
+  url: https://github.com/bekiryagan/kubernetes-portfolio.git
+  # For private repos, add:
+  # username: bekiryagan
+  # password: <github-personal-access-token>
+
+---
+# ArgoCD Notifications ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/managed-by: bekiryagan
+data:
+  # Slack notification template
+  template.app-deployed: |
+    message: |
+      Application {{.app.metadata.name}} has been deployed.
+      Sync Status: {{.app.status.sync.status}}
+      Health Status: {{.app.status.health.status}}
+  
+  template.app-health-degraded: |
+    message: |
+      Application {{.app.metadata.name}} health has degraded.
+      Health Status: {{.app.status.health.status}}
+  
+  template.app-sync-failed: |
+    message: |
+      Application {{.app.metadata.name}} sync has failed.
+      Error: {{.app.status.operationState.message}}
+  
+  # Triggers
+  trigger.on-deployed: |
+    - description: Application is synced and healthy
+      send:
+        - app-deployed
+      when: app.status.operationState.phase in ['Succeeded'] and app.status.health.status == 'Healthy'
+  
+  trigger.on-health-degraded: |
+    - description: Application health has degraded
+      send:
+        - app-health-degraded
+      when: app.status.health.status == 'Degraded'
+  
+  trigger.on-sync-failed: |
+    - description: Application sync has failed
+      send:
+        - app-sync-failed
+      when: app.status.operationState.phase in ['Error', 'Failed']
